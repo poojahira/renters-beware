@@ -1,0 +1,263 @@
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.functions._
+import org.datasyslab.geospark.enums.{FileDataSplitter, GridType, IndexType}
+import org.datasyslab.geospark.spatialRDD.{CircleRDD, PointRDD, PolygonRDD}
+import org.apache.spark.ml.feature.{StandardScaler,StandardScalerModel}
+import org.apache.spark.ml.feature.VectorAssembler
+import org.apache.spark.ml.clustering.{KMeans, KMeansModel}
+
+//Get building wise data of 311 calls for query form
+
+var rdd311 = sc.textFile("hdfs:///user/ph1130/bdadproject/data/311_calls.tsv")
+val header = rdd311.first()
+val rdd1 = rdd311.filter(line=>line != header)
+val rdd2 = rdd1.map(line=>line.split("\t")).filter(line=>line.length >= 40 && !line(26).isEmpty() && !line(27).isEmpty())
+val rdd3 = rdd2.map(line=>(line(0),line(1).split(" ")(0),line(3),line(5),line(9),line(9).split(" ")(0),line(10),line(24),line(25),line(26),line(27),line(38),line(39)))
+val rdd4 = rdd3.filter(line=> line._10.toInt > 0 && line._11.toInt > 0)
+
+case class Calls311(Complaint_No:Long,Created_Date:String,Agency:String,Complaint_Type:String,Address:String,House_No:String,Street:String,BBL:String,Borough:String,X:Int,Y:Int,Latitude:Double,Longitude:Double)
+val df311 = rdd4.map(line=>Calls311(line._1.toLong,line._2,line._3,line._4,line._5,line._6,line._7,line._8,line._9,Math.round(line._10.toInt/10),Math.round(line._11.toInt/10),Math.round(line._12.toFloat * 10000.0)/10000.0,Math.round(line._13.toFloat * 10000.0)/10000.0)).toDF()
+val df311_1 = df311.withColumn("Created_Date",to_date(from_unixtime(unix_timestamp($"Created_Date" ,"MM/dd/yyyy"), "yyyy-MM-dd")))
+val df311_2 = df311_1.filter($"Created_Date" >= "2013-07-01")
+val df311_4 = df311_2.withColumn("Boro_Code",when($"Borough" === "MANHATTAN", 1).otherwise(when($"Borough" === "BRONX", 2).otherwise(when($"Borough" === "QUEENS",4).otherwise(when($"Borough" === "BROOKLYN",3 ).otherwise(when($"Borough" === "STATEN ISLAND",5))))))
+val df311_5 = df311_4.withColumn("Key",concat($"House_No",lit(","),$"Street",lit(","),$"Boro_Code"))
+val df311_all = df311_5.groupBy("Key").count
+val df311_all1 = df311_all.select($"Key",$"count".alias("All_Complaints"))
+val df311_noise = df311_5.filter($"Complaint_Type".like("%Noise%"))
+val df311_noise1 = df311_noise.groupBy($"Key").count
+val df311_noise2 = df311_noise1.select($"Key".alias("Key_noise"),$"count".alias("Noise_Complaints"))
+val df311_rodent = df311_5.filter($"Complaint_Type".like("%Rodent%"))
+val df311_rodent1 = df311_rodent.groupBy($"Key").count
+val df311_rodent2 = df311_rodent1.select($"Key".alias("Key_rodents"),$"count".alias("Rodent_Complaints"))
+val df311_streetSidewalk = df311_5.filter($"Complaint_Type" === "Street Condition" || $"Complaint_Type".contains("idewalk Condition"))
+val df311_streetSidewalk1 = df311_streetSidewalk.groupBy($"Key").count
+val df311_streetSidewalk2 = df311_streetSidewalk1.select($"Key".alias("Key_sidewalk"),$"count".alias("Street_Sidewalk_Complaints"))
+val df311_graffiti = df311_5.filter($"Complaint_Type".like("%Graffiti%"))
+val df311_graffiti1 = df311_graffiti.groupBy($"Key").count
+val df311_graffiti2 = df311_graffiti1.select($"Key".alias("Key_graffiti"),$"count".alias("Graffiti_Complaints"))
+val df311_airWaterQuality = df311_5.filter($"Complaint_Type".like("%Quality%"))
+val df311_airWaterQuality1 = df311_airWaterQuality.groupBy($"Key").count
+val df311_airWaterQuality2 = df311_airWaterQuality1.select($"Key".alias("Key_air"),$"count".alias("Air_Water_Complaints"))
+val df311_garbage = df311_5.filter($"Complaint_Type".like("%Overflowing%") || $"Complaint_Type".like("%Garbage%"))
+val df311_garbage1 = df311_garbage.groupBy($"Key").count
+val df311_garbage2 = df311_garbage1.select($"Key".alias("Key_garbage"),$"count".alias("Garbage_Complaints"))
+val df311_housing = df311_5.filter($"Agency" === "HPD")
+val df311_housing1 = df311_housing.groupBy($"Key").count
+val df311_housing2 = df311_housing1.select($"Key".alias("Key_housing"),$"count".alias("Housing_Complaints"))
+val df311_drinking = df311_5.filter($"Complaint_Type".like("%Drinking%"))
+val df311_drinking1 = df311_drinking.groupBy($"Key").count
+val df311_drinking2 = df311_drinking1.select($"Key".alias("Key_drinking"),$"count".alias("Public_Drinking_Complaints"))
+val int1_df311 = df311_all1.join(df311_noise2,df311_all1("Key") === df311_noise2("Key_noise"),"left").join(df311_housing2,df311_all1("Key") === df311_housing2("Key_housing"),"left").join(df311_drinking2,df311_all1("Key") === df311_drinking2("Key_drinking"),"left").join(df311_airWaterQuality2,df311_all1("Key") === df311_airWaterQuality2("Key_air"),"left").join(df311_rodent2,df311_all1("Key") === df311_rodent2("Key_rodents"),"left").join(df311_garbage2,df311_all1("Key") === df311_garbage2("Key_garbage"),"left").join(df311_streetSidewalk2,df311_all1("Key") === df311_streetSidewalk2("Key_sidewalk"),"left").join(df311_graffiti2,df311_all1("Key") === df311_graffiti2("Key_graffiti"),"left")
+val final_df311 = int1_df311.select(int1_df311("Key"),int1_df311("All_Complaints"),int1_df311("Housing_Complaints"),int1_df311("Noise_Complaints"),int1_df311("Rodent_Complaints"),int1_df311("Garbage_Complaints"),int1_df311("Air_Water_Complaints"),int1_df311("Street_Sidewalk_Complaints"),int1_df311("Graffiti_Complaints"),int1_df311("Public_Drinking_Complaints")).na.fill(0)
+final_df311.coalesce(1).write.format("com.databricks.spark.csv").option("delimiter", "\t").option("header","true").save("hdfs:///user/ph1130/buildings311_1")
+
+
+
+
+// Map rental dwellings dataset to latitude longitude and neighborhood information
+
+val mn_pluto = sc.textFile("hdfs:///user/ph1130/bdadproject/data/MN_18v1.csv")
+val header = mn_pluto.first()
+val mn_pluto1 = mn_pluto.filter(line=>line != header)
+val bx_pluto = sc.textFile("hdfs:///user/ph1130/bdadproject/data/BX_18v1.csv")
+val header = bx_pluto.first()
+val bx_pluto1 = bx_pluto.filter(line=>line != header)
+val bk_pluto = sc.textFile("hdfs:///user/ph1130/bdadproject/data/BK_18v1.csv")
+val header = bk_pluto.first()
+val bk_pluto1 = bk_pluto.filter(line=>line != header)
+val qn_pluto = sc.textFile("hdfs:///user/ph1130/bdadproject/data/QN_18v1.csv")
+val header = qn_pluto.first()
+val qn_pluto1 = qn_pluto.filter(line=>line != header)
+val si_pluto = sc.textFile("hdfs:///user/ph1130/bdadproject/data/SI_18v1.csv")
+val header = si_pluto.first()
+val si_pluto1 = si_pluto.filter(line=>line != header)
+val ct_2_nta = sc.textFile("hdfs:///user/ph1130/bdadproject/data/ct2nta.csv")
+
+val dfct2nta = ct_2_nta.map(line=>line.split(",")).map(line=>(line(2),if (line(3).endsWith("00"))(line(3).toInt/100) else line(3).toInt,line(6))).toDF("Boro","CT","NTA")
+val pluto_rdd = mn_pluto1.union(bx_pluto1).union(bk_pluto1).union(qn_pluto1).union(si_pluto1)
+val pluto_rdd1 = pluto_rdd.map(line=>line.split(",")).filter(line=>(line.length >= 76 && line(72).toInt != 0 && line(73) != "" && line(74) != "")).map(line=>(line(1),line(2),line(72),line(16),line(73).toInt,line(74).toInt,line(69)))
+val dfpluto = pluto_rdd1.toDF("Block","Lot","CT2010","Address","X","Y","Boro_Code")
+val dfnta_pluto = dfpluto.join(dfct2nta,(dfpluto("CT2010") === dfct2nta("CT")) && dfpluto("Boro_Code") === dfct2nta("Boro"))
+val xy = dfnta_pluto.select($"X",$"Y")
+xy.coalesce(1).write.format("com.databricks.spark.csv").option("header","false").save("hdfs:///user/ph1130/xypluto2")
+val pointRDDInputLocation = "xypluto2/part-00000"
+val pointRDDOffset = 0
+val pointRDDSplitter = FileDataSplitter.WKT
+val carryOtherAttributes = true
+var objectRDD1 = new PointRDD(sc, pointRDDInputLocation, pointRDDOffset, pointRDDSplitter, carryOtherAttributes)
+val sourceCrsCode = "epsg:2263"
+val targetCrsCode = "epsg:4326"
+objectRDD.CRSTransform(sourceCrsCode, targetCrsCode)
+objectRDD1.rawSpatialRDD.saveAsTextFile("hdfs:///user/ph1130/plutolatlong4")
+val tempdf = sc.textFile("plutolatlong4").map(line=>line.split("\t")).map(line=>(line(0).split(" ")(1).replace("(",""),line(0).split(" ")(2).replace(")",""),line(1).split(",")(0),line(1).split(",")(1))).distinct.toDF()
+val merged_latlong = dfnta_pluto.join(tempdf,(dfnta_pluto("X") === tempdf("_3")) && (dfnta_pluto("Y") === tempdf("_4")))
+val merged_latlong1 = merged_latlong.select($"Block".alias("Block1"),$"Lot".alias("Lot1"),$"Boro_Code".alias("Boro_Code1"),$"Address".alias("Address1"),$"NTA".alias("NTA_Name"),$"X",$"Y",$"_1".alias("Latitude"),$"_2".alias("Longitude"))
+
+
+val hpd_rdd = sc.textFile("hdfs:///user/ph1130/bdadproject/data/Registration20180630.txt")
+val header = hpd_rdd.first()
+val hpd_rdd1 = hpd_rdd.filter(line=>line != header)
+val hpd_rdd2 = hpd_rdd1.map(line=>line.split("\\|")).filter(line => line(0).toLong > 0 && line(1).toLong > 0)
+val hpd_rdd3 = hpd_rdd2.map(line=>(line(0),line(1),line(2).toInt,line(4),line(7),if (line(9).length == 5) line(9) else " ",line(10).toInt,line(11).toInt))
+case class HPD(RegistrationID:String,BuildingID:String,Boro_Code:Int,House_No:String,Street:String,ZipCode:String,Block:Int,Lot:Int)
+val dfhpd = hpd_rdd3.map(line=>HPD(line._1,line._2,line._3,line._4,line._5,line._6,line._7,line._8)).toDF()
+val dfhpd1 = dfhpd.withColumn("Address",concat($"House_No",lit(" "),$"Street"))
+val r1 = dfhpd1.join(merged_latlong1,$"Address" === $"Address1").drop($"Lot1")
+val r2 = dfhpd1.join(merged_latlong1,(dfhpd1("Block") === merged_latlong1("Block1")) && (dfhpd1("Boro_Code") === merged_latlong1("Boro_Code1")) && (dfhpd1("Lot") === merged_latlong1("Lot1"))).drop($"Address1")
+val r11 = r1.drop($"Address1")
+val r12 = r11.drop($"Block1")
+val r13 = r12.drop($"Boro_Code1")
+val r21 = r2.drop($"Lot1")
+val r22 = r21.drop($"Block1")
+val r23 = r22.drop($"Boro_Code1")
+val r3 = r23.select($"RegistrationID")
+val r4 = dfhpd1.select($"RegistrationID")
+val r5 = r4.except(r3)
+val r6 = r5.join(r13,"RegistrationID")
+val finalHPDRDD = r6.unionAll(r23)
+finalHPDRDD.write.format("com.databricks.spark.csv").option("header","false").save("hdfs:///user/ph1130/HPDlatlong")
+
+
+
+
+//Generate heatmap for 311 calls
+
+val dfcsv = df311_5.withColumn("latlong",concat($"Latitude",lit(","),$"Longitude"))
+val dfcsvgrp = dfcsv.groupBy("latlong").count
+val dfcsvgrp1 = dfcsvgrp.filter($"count" > 1)
+dfcsvgrp1.rdd.map(line=> "{location: new google.maps.LatLng(" + line(0)+ "), weight: "+ line(1) + "},").saveAsTextFile("hdfs:///user/ph1130/gmap_2")
+
+
+
+
+//Generate infomap information for 311 calls
+
+val merged_latlong2 = merged_latlong1.select($"Block1",$"Lot1",$"Address1",$"Boro_Code1",$"NTA_Name")
+val block = udf {str:String => str.slice(1,6).toInt}
+val lot = udf {str:String => str.slice(6,10).toInt}
+val df311_10 = df311_5.filter(($"BBL" !== "") && (length($"BBL") === 10))
+val tmpbbl = df311_10.join(merged_latlong2,(block(df311_10("BBL")) === merged_latlong2("Block1")) && (df311_10("Boro_Code") === merged_latlong2("Boro_Code1")) && (lot(df311_10("BBL")) === merged_latlong2("Lot1")))
+val tmpbbl1 = tmpbbl.select("Complaint_No","Created_Date","Agency","Complaint_Type","Address","House_No","Street","BBL","Borough","X","Y","Latitude","Longitude","NTA_Name")
+val tmpadd = df311_5.join(merged_latlong2,(df311_5("Address") === merged_latlong2("Address1")) && (df311_5("Boro_Code")=== merged_latlong2("Boro_Code1")))
+val tmpadd1 = tmpadd.select("Complaint_No","Created_Date","Agency","Complaint_Type","Address","House_No","Street","BBL","Borough","X","Y","Latitude","Longitude","NTA_Name")
+val complaints = df311_5.select($"Complaint_No")
+val complaints_tmpbbl = tmpbbl.select($"Complaint_No")
+val remaining = complaints.except(complaints_tmpbbl)
+val tmpadd2 = remaining.join(tmpadd1,"Complaint_No")
+val df311_nta = tmpadd2.unionAll(tmpbbl1)
+val df311_nta1 = df311_nta.groupBy("NTA_Name").count
+val df311_nta2 = df311_nta1.select($"NTA_Name",$"count".alias("All_Complaints"))
+val df311_noise = df311_nta.filter($"Complaint_Type".like("%Noise%"))
+val df311_noise1 = df311_noise.groupBy("NTA_Name").count
+val df311_noise2 = df311_noise1.select($"NTA_Name".alias("NTA_noise"),$"count".alias("Noise_Complaints"))
+val df311_housing = df311_nta.filter($"Agency" === "HPD")
+val df311_housing1 = df311_housing.groupBy($"NTA_Name").count
+val df311_housing2 = df311_housing1.select($"NTA_Name".alias("NTA_housing"),$"count".alias("Housing_Complaints"))
+val df311_streetSidewalk = df311_nta.filter($"Complaint_Type" === "Street Condition" || $"Complaint_Type".contains("idewalk Condition"))
+val df311_streetSidewalk1 = df311_streetSidewalk.groupBy($"NTA_Name").count
+val df311_streetSidewalk2 = df311_streetSidewalk1.select($"NTA_Name".alias("NTA_sidewalk"),$"count".alias("Street_Sidewalk_Complaints"))
+val df311_graffiti = df311_nta.filter($"Complaint_Type".like("%Graffiti%"))
+val df311_graffiti1 = df311_graffiti.groupBy($"NTA_Name").count
+val df311_graffiti2 = df311_graffiti1.select($"NTA_Name".alias("NTA_graffiti"),$"count".alias("Graffiti_Complaints"))
+val nta_df311 = df311_nta2.join(df311_noise2,df311_nta2("NTA_Name") === df311_noise2("NTA_noise"),"left").join(df311_housing2,df311_nta2("NTA_Name") === df311_housing2("NTA_housing"),"left").join(df311_streetSidewalk2,df311_nta2("NTA_Name") === df311_streetSidewalk2("NTA_sidewalk"),"left").join(df311_graffiti2,df311_nta2("NTA_Name") === df311_graffiti2("NTA_graffiti"),"left")
+val nta1_df311 = nta_df311.select("NTA_Name","All_Complaints","Noise_Complaints","Housing_Complaints","Street_Sidewalk_Complaints","Graffiti_Complaints")
+nta1_df311.coalesce(1).write.format("com.databricks.spark.csv").option("header","true").save("hdfs:///user/ph1130/infomap311_1")
+
+
+
+
+
+//Merge information map datasets received from all team-mates
+
+case class schemaviol(NTA1:String,All_violations:String,Elevator_Violations:String,No_inspection_on_boiler_violations:String,Low_pressure_boiler_violations:String,	Construction_violations:String,Extremely_Hazardous_Violations:String)
+
+case class schemacrimes(NTA2:String,GRAND_LARCENY:String,FRAUD_THEFT:String,RAPE_OTHER_SEX_CRIMES:String,MURDER_MANSLAUGHTER:String,BURGLARY:String,HARRASSMENT:String,ARSON:String,TOTAL_CRIMES:String)
+
+case class schema311(NTA:String,All_311complaints:String,Noise311complaints:String,Housing311complainnts:String,Street311complaints:String,Graffiti311complaints:String)
+
+case class schemapermit(NTA3:String,Count:String)
+
+val crimes1 = sc.textFile("hdfs:///user/ph1130/bdadproject/data/Crimes1.txt")
+val header = crimes1.first()
+val crimes_type = crimes1.filter(line=>line != header)
+val crimes_type2 = crimes_type.map(line=>line.split(","))
+
+val crimes2 = sc.textFile("hdfs:///user/ph1130/bdadproject/data/Crime2.txt")
+val header = crimes2.first()
+val crimes_subtype = crimes2.filter(line=>line != header)
+val crimes_subtype2 = crimes_subtype.map(line=>line.split(",")).map(line=>schemacrimes(line(0),line(1),line(2),line(3),line(4),line(5),line(6),line(7),line(8))).toDF()
+
+val permits = sc.textFile("hdfs:///user/ph1130/bdadproject/data/Permits1.txt")
+val permits1 = permits.map(line=>line.split(",")).map(line=>schemapermit(line(0),line(1))).toDF()
+
+val violations = sc.textFile("hdfs:///user/ph1130/bdadproject/data/violation_infomap.txt")
+val header = violations.first()
+val violations1 = violations.filter(line=>line != header)
+val violations2 = violations1.map(line=>line.split(",")).map(line=>schemaviol(line(0),line(1),line(2),line(3),line(4),line(5),line(6))).toDF()
+
+val df311 = sc.textFile("hdfs:///user/ph1130/infomap311_3")
+val df311_1 = df311.map(line=>line.split(",")).map(line=>schema311(line(0),line(1),line(2),line(3),line(4),line(5))).toDF()
+
+val infomap1 = df311_1.join(violations2,df311_1("NTA")===violations2("NTA1"),"left").join(crimes_subtype2,df311_1("NTA")===crimes_subtype2("NTA2"),"left").join(permits1,df311_1("NTA")===permits1("NTA3"),"left")
+infomap1.coalesce(1).write.format("com.databricks.spark.csv").option("header","true").save("hdfs:///user/ph1130/infomapfinal")
+
+
+
+
+
+//Cluster neighborhoods
+
+val infomap1_1 = sc.textFile("hdfs:///user/ph1130/infomapfinal").map(line=>line.split(",")).map(line=>(line(0),line(1),line(7),line(21),line(23)))
+val header = infomap1_1.first()
+val infomap1_2 = infomap1_1.filter(line=>line != header)
+val infomap2 = infomap1_2.toDF("NTA","All_311complaints","All_housing_violations","Total_Crimes","Permits_Count").na.replace("*", Map("null" -> "0"))
+val toInt    = udf[Int, String]( _.toInt)
+val infomap3 = infomap2.select($"NTA",toInt($"All_311complaints"),toInt($"Total_Crimes"),toInt($"All_housing_violations"),toInt($"Permits_Count"))
+
+val assembler = new VectorAssembler().setInputCols(Array("UDF(All_311complaints)","UDF(Total_Crimes)","UDF(All_housing_violations)","UDF(Permits_Count)")).setOutputCol("features")
+val clusters = assembler.transform(infomap3)
+val kmeans = new KMeans().setFeaturesCol("features").setK(30).setInitMode("k-means||").setInitSteps(2)
+val model = kmeans.fit(clusters)
+val clusters_nta = model.transform(clusters)
+val clustered_nta = clusters_nta.groupBy("prediction").agg(collect_list("NTA"))
+val clustered_nta1 = clustered_nta.withColumn("Exploded",explode($"collect_list(NTA)"))
+clustered_nta1.coalesce(1).write.format("com.databricks.spark.csv").option("header","true").save("hdfs:///user/ph1130/clusters1")
+
+
+
+
+
+//Get building-wise neighborhood scores
+
+val rdd = sc.textFile("hdfs:///user/ph1130/HPDlatlong").map(line=>line.split(","))
+val rdd2 = rdd.map(line=>(line(2),line(3),line(4),line(9)))
+val df = rdd2.toDF()
+val df1 = df.withColumn("Key",concat($"_2",lit(","),$"_3",lit(","),$"_1"))
+val rankings = sc.textFile("hdfs:///user/ph1130/infomap-rankings-pruned.csv").map(line=>line.split(","))
+case class schemarankings(NTA:String, Safety_Score:String, Quality_of_life_score:String, Investment_Gentrification_score:String, Overall_Neighborhood_Score:String)
+val rankingsdf = rankings.map(line=>schemarankings(line(0),line(1),line(2),line(3),line(4))).toDF()
+val dfnta_rankings = df1.join(rankingsdf,rankingsdf("NTA") === df1("_4"),"left")
+val dfnta_rankings1 = dfnta_rankings.select("Key","NTA","Safety_Score","Quality_of_life_score","Investment_Gentrification_score","Overall_Neighborhood_Score")
+dfnta_rankings1.coalesce(1).write.format("com.databricks.spark.csv").option("delimiter", "\t").option("header","true").save("hdfs:///user/ph1130/nta_rankings1")
+
+
+
+
+//Find correlations
+
+val calls311 = infomap3.select("UDF(All_311complaints)")
+val permits = infomap3.select("UDF(Permits_count)")
+val crime = infomap3.select("UDF(Total_Crimes)")
+val violations = infomap3.select("UDF(All_housing_violations)")
+// function below sourced from https://gist.github.com/frgomes/c6bf34eeb5ae1769b072
+def toDouble: (Any) => Double = { case i: Int => i case f: Float => f case d: Double => d }
+val calls311_1 = calls311.map(line=>toDouble(line(0)))
+val permits1 = permits.map(line=>toDouble(line(0)))
+val violations1 = violations.map(line=>toDouble(line(0)))
+val crime1 = crime.map(line=>toDouble(line(0)))
+val correlation: Double = Statistics.corr(calls311_1, permits1, "pearson")
+val correlation: Double = Statistics.corr(calls311_1, crime1, "pearson")
+val correlation: Double = Statistics.corr(calls311_1, violations1, "pearson")
+val correlation: Double = Statistics.corr(crime1,violations1, "pearson")
+val correlation: Double = Statistics.corr(permits1, crime1, "pearson")
+val correlation: Double = Statistics.corr(permits1, violations1, "pearson")
